@@ -5,7 +5,7 @@ from datetime import datetime
 from web3 import Web3
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv()
 
@@ -15,11 +15,11 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHECK_INTERVAL = 1800  # 30 minutes in seconds
 
 if not RPC_URL or not TELEGRAM_BOT_TOKEN:
-    raise ValueError("⚠️ RPC_URL ou TELEGRAM_BOT_TOKEN manquant dans le .env")
+    raise ValueError("⚠️ Missing RPC_URL or TELEGRAM_BOT_TOKEN in .env")
 
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 if not w3.is_connected():
-    raise ConnectionError("❌ Impossible de se connecter au RPC.")
+    raise ConnectionError("❌ Unable to connect to RPC")
 
 # User data storage: {chat_id: {"addresses": [addr1, addr2], "active_address": addr, "monitoring": True/False}}
 user_data = {}
@@ -38,40 +38,72 @@ MARKETS = {
             "name": "USDhl Frontier Lending",
             "address": "0x9896a8605763106e57A51aa0a97Fe8099E806bb3",
             "abi_file": "USDhlFrontierLending.json",
+            "asset_decimals": 6,  # USDhl uses 6 decimals
         },
         {
             "name": "USDT0 Frontier Lending",
             "address": "0x66c71204B70aE27BE6dC3eb41F9aF5868E68fDb6",
             "abi_file": "USDT0FrontierLending.json",
+            "asset_decimals": 6,  # USDT0 uses 6 decimals
         },
     ],
     "borrow": []
 }
 
 
-def get_lending_position(contract, user_addr):
-    """Retrieve lending position"""
+def get_lending_position(contract, user_addr, asset_decimals=18):
+    """Retrieve lending position with multiple calculation methods"""
     position = {}
     try:
-        # Get user shares
-        balance_shares = contract.functions.balanceOf(user_addr).call()
-        position["shares_balance"] = balance_shares / 1e18
+        # Get user shares (vault shares are always 18 decimals in ERC4626)
+        balance_shares_wei = contract.functions.balanceOf(user_addr).call()
+        shares = balance_shares_wei / 1e18
+        position["shares_balance"] = shares
+
+        print(f"  User shares: {shares:.4f} ({balance_shares_wei} wei)")
+
+        if shares == 0:
+            position["assets_value"] = 0
+            return position
 
         # Get vault totals
-        total_assets = contract.functions.totalAssets().call()
-        total_supply = contract.functions.totalSupply().call()
-        position["vault_total_assets"] = total_assets / 1e18
-        position["vault_total_shares"] = total_supply / 1e18
+        total_assets_wei = contract.functions.totalAssets().call()
+        total_supply_wei = contract.functions.totalSupply().call()
 
-        # Calculate assets value using convertToAssets
-        if balance_shares > 0:
-            assets = contract.functions.convertToAssets(balance_shares).call()
-            position["assets_value"] = assets / 1e18
+        # Assets use the underlying token decimals, shares use 18
+        asset_divisor = 10 ** asset_decimals
+        position["vault_total_assets"] = total_assets_wei / asset_divisor
+        position["vault_total_shares"] = total_supply_wei / 1e18
+
+        print(f"  Vault total assets: {position['vault_total_assets']:.4f} ({total_assets_wei} wei, {asset_decimals} decimals)")
+        print(f"  Vault total shares: {position['vault_total_shares']:.4f} ({total_supply_wei} wei, 18 decimals)")
+
+        # Method 1: Try convertToAssets (ERC4626 standard)
+        try:
+            assets_wei = contract.functions.convertToAssets(balance_shares_wei).call()
+            position["assets_value"] = assets_wei / asset_divisor
+            position["calculation_method"] = "convertToAssets"
+            print(f"  ✅ convertToAssets: {position['assets_value']:.4f} assets ({assets_wei} wei ÷ 10^{asset_decimals})")
+            return position
+        except Exception as e:
+            print(f"  ❌ convertToAssets failed: {str(e)[:100]}")
+
+        # Method 2: Manual calculation using ratio
+        if total_supply_wei > 0:
+            # assets_value = (user_shares * total_assets) / total_supply
+            assets_wei = (balance_shares_wei * total_assets_wei) // total_supply_wei
+            position["assets_value"] = assets_wei / asset_divisor
+            position["calculation_method"] = "manual_ratio"
+            print(f"  ✅ Manual calculation: {position['assets_value']:.4f} ({assets_wei} wei)")
         else:
             position["assets_value"] = 0
+            position["calculation_method"] = "zero_supply"
+            print(f"  ⚠️ Total supply is 0, cannot calculate")
 
         return position
+
     except Exception as e:
+        print(f"  ❌ Error: {str(e)}")
         return {"error": str(e)}
 
 
@@ -84,17 +116,24 @@ def fetch_positions(address):
 
     results = {"lending": [], "timestamp": datetime.now()}
 
+    print(f"\n{'='*60}")
+    print(f"Fetching positions for {checksum_addr}")
+    print(f"{'='*60}")
+
     for market in MARKETS["lending"]:
+        print(f"\n📥 {market['name']}...")
         try:
             abi = load_abi(market["abi_file"])
             contract = w3.eth.contract(address=market["address"], abi=abi)
-            data = get_lending_position(contract, checksum_addr)
+            asset_decimals = market.get("asset_decimals", 18)
+            data = get_lending_position(contract, checksum_addr, asset_decimals)
             results["lending"].append({
                 "name": market["name"],
                 "address": market["address"],
                 "data": data
             })
         except Exception as e:
+            print(f"  ❌ Failed: {str(e)}")
             results["lending"].append({
                 "name": market["name"],
                 "address": market["address"],
@@ -121,13 +160,27 @@ def format_position_message(address, positions):
 
         if "error" in market["data"]:
             msg += f"❌ Error: {market['data']['error'][:100]}\n"
-        elif market["data"].get("assets_value", 0) > 0:
-            value = market["data"]["assets_value"]
-            total_value += value
+        elif market["data"].get("shares_balance", 0) > 0:
             shares = market["data"]["shares_balance"]
+            value = market["data"].get("assets_value", 0)
+            total_value += value
 
-            msg += f"💰 Value: *${value:,.2f}*\n"
-            msg += f"📊 Shares: {shares:,.2f}\n"
+            # Show asset value prominently
+            msg += f"💰 *Assets: {value:,.4f}$*\n"
+            msg += f"📊 Shares: {shares:,.4f}\n"
+
+            # Debug info if values seem wrong
+            if value == 0 and shares > 0:
+                vault_assets = market["data"].get("vault_total_assets", 0)
+                vault_shares = market["data"].get("vault_total_shares", 0)
+                msg += f"⚠️ *Debug Info:*\n"
+                msg += f"  Vault Assets: {vault_assets:,.6f}\n"
+                msg += f"  Vault Shares: {vault_shares:,.6f}\n"
+                if vault_shares > 0:
+                    ratio = vault_assets / vault_shares
+                    expected = shares * ratio
+                    msg += f"  Share Price: {ratio:.8f}\n"
+                    msg += f"  Expected Value: {expected:.6f}\n"
 
             # Health factor if available
             if "health_factor" in market["data"]:
@@ -138,7 +191,7 @@ def format_position_message(address, positions):
             msg += f"ℹ️ No position\n"
 
     msg += f"━━━━━━━━━━━━━━━━━━━━\n"
-    msg += f"💎 *Total Value: ${total_value:,.2f}*\n"
+    msg += f"💎 *Total Value: {total_value:,.4f}$*\n"
 
     return msg
 
@@ -209,7 +262,9 @@ async def add_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"✅ Address added: `{address[:6]}...{address[-4:]}`\n"
-        f"📊 Total addresses: {len(user_data[chat_id]['addresses'])}",
+        f"📊 Total addresses: {len(user_data[chat_id]['addresses'])}\n\n"
+        f"💡 Use /check to see your positions\n"
+        f"💡 Use /monitor to start tracking",
         parse_mode='Markdown'
     )
 
@@ -346,7 +401,7 @@ async def remove_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Usage: /remove <address>")
         return
 
-    address = context.args[0].lower()
+    address = ''.join(context.args).lower().strip()
 
     if chat_id not in user_data or address not in user_data[chat_id]["addresses"]:
         await update.message.reply_text("❌ Address not found")
@@ -450,7 +505,6 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback))
 
     # Handle plain text messages (for direct address input)
-    from telegram.ext import MessageHandler, filters
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("✅ Bot started! Send /start to your bot to begin")

@@ -8,21 +8,28 @@ RPC_URL = os.getenv("RPC_URL")
 USER_ADDRESS = os.getenv("USER_ADDRESS")
 
 if not RPC_URL or not USER_ADDRESS:
-    print("\n❌ Variables manquantes!")
-    print(f"📁 Dossier actuel: {os.getcwd()}")
-    print(f"📄 Fichier .env existe: {os.path.exists('.env')}")
-    raise ValueError("⚠️ RPC_URL ou USER_ADDRESS manquant dans le .env")
+    print("\n❌ Missing variables!")
+    print(f"📁 Current directory: {os.getcwd()}")
+    print(f"📄 .env file exists: {os.path.exists('.env')}")
+    if os.path.exists('.env'):
+        print("\n📋 .env content:")
+        with open('.env', 'r') as f:
+            for line in f:
+                if line.strip():
+                    key = line.split('=')[0]
+                    print(f"  {key}=***")
+    raise ValueError("⚠️ Missing RPC_URL or USER_ADDRESS in .env")
 
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 if not w3.is_connected():
-    raise ConnectionError("❌ Impossible de se connecter au RPC.")
+    raise ConnectionError("❌ Unable to connect to RPC")
 
 # Convert address to checksum format
 USER_ADDRESS = w3.to_checksum_address(USER_ADDRESS)
 
 
 def load_abi(filename):
-    """Load ABI from JSON file in abi/ directory, handling BOM and empty files"""
+    """Load ABI from JSON file in abi/ directory, handling BOM"""
     filepath = f"abi/{filename}"
     try:
         if not os.path.exists(filepath):
@@ -32,7 +39,6 @@ def load_abi(filename):
         if file_size == 0:
             raise ValueError(f"ABI file is empty: {filepath}")
 
-        # Read with utf-8-sig to automatically remove BOM
         with open(filepath, "r", encoding='utf-8-sig') as f:
             content = f.read().strip()
             if not content:
@@ -52,22 +58,16 @@ MARKETS = {
             "name": "USDhl Frontier Lending",
             "address": "0x9896a8605763106e57A51aa0a97Fe8099E806bb3",
             "abi_file": "USDhlFrontierLending.json",
+            "asset_decimals": 6,  # USDhl uses 6 decimals
         },
         {
             "name": "USDT0 Frontier Lending",
             "address": "0x66c71204B70aE27BE6dC3eb41F9aF5868E68fDb6",
             "abi_file": "USDT0FrontierLending.json",
+            "asset_decimals": 6,  # USDT0 uses 6 decimals
         },
     ],
-    "borrow": [
-        # Uncomment when you have the ABI file
-        # {
-        #     "name": "WHLP/USDT0 Borrow Market",
-        #     "address": "0xd4fd53f612eaf411a1acea053cfa28cbfeea683273c4133bf115b47a20130305",
-        #     "abi_file": "WHLPUSDT0Borrow.json",
-        #     "market_id": 0,
-        # }
-    ],
+    "borrow": []
 }
 
 
@@ -79,50 +79,70 @@ def get_contract_functions(contract):
 def get_lending_position(contract, user_addr, market_name):
     """
     Retrieve lending position including balance, collateral, debt and APY.
-    Adapts to available contract methods.
+    Uses multiple methods to calculate asset value.
     """
     position = {}
 
     try:
         available_fns = get_contract_functions(contract)
 
-        # Get user balance (shares)
+        # Get user shares
         if "balanceOf" in available_fns:
             try:
-                balance_shares = contract.functions.balanceOf(user_addr).call()
-                position["shares_balance"] = balance_shares / 1e18
+                balance_shares_wei = contract.functions.balanceOf(user_addr).call()
+                shares = balance_shares_wei / 1e18
+                position["shares_balance"] = shares
+                print(f"  User shares: {shares:.4f} ({balance_shares_wei} wei)")
             except Exception as e:
                 position["balance_error"] = str(e)
+                return position
 
-        # Get total assets in the vault
+        # Get vault totals
         if "totalAssets" in available_fns:
             try:
-                total_assets = contract.functions.totalAssets().call()
-                position["vault_total_assets"] = total_assets / 1e18
+                total_assets_wei = contract.functions.totalAssets().call()
+                position["vault_total_assets"] = total_assets_wei / 1e18
+                print(f"  Vault total assets: {position['vault_total_assets']:.4f} ({total_assets_wei} wei)")
             except Exception as e:
                 pass
 
-        # Get total supply (shares)
         if "totalSupply" in available_fns:
             try:
-                total_supply = contract.functions.totalSupply().call()
-                position["vault_total_shares"] = total_supply / 1e18
+                total_supply_wei = contract.functions.totalSupply().call()
+                position["vault_total_shares"] = total_supply_wei / 1e18
+                print(f"  Vault total shares: {position['vault_total_shares']:.4f} ({total_supply_wei} wei)")
             except Exception as e:
                 pass
 
         # Calculate user's asset value
-        if "shares_balance" in position and "vault_total_assets" in position and "vault_total_shares" in position:
-            if position["vault_total_shares"] > 0:
-                position["assets_value"] = (position["shares_balance"] / position["vault_total_shares"]) * position["vault_total_assets"]
+        if "shares_balance" in position and position["shares_balance"] > 0:
+            balance_shares_wei = int(position["shares_balance"] * 1e18)
 
-        # Convert shares to assets using convertToAssets
-        if "convertToAssets" in available_fns and "shares_balance" in position:
-            try:
-                shares_wei = int(position["shares_balance"] * 1e18)
-                assets = contract.functions.convertToAssets(shares_wei).call()
-                position["assets_value"] = assets / 1e18
-            except Exception:
-                pass
+            # Method 1: Try convertToAssets (ERC4626 standard)
+            if "convertToAssets" in available_fns:
+                try:
+                    assets_wei = contract.functions.convertToAssets(balance_shares_wei).call()
+                    position["assets_value"] = assets_wei / 1e18
+                    position["calculation_method"] = "convertToAssets"
+                    print(f"  ✅ convertToAssets: {position['assets_value']:.4f} ({assets_wei} wei)")
+                    return position
+                except Exception as e:
+                    print(f"  ❌ convertToAssets failed: {str(e)[:100]}")
+
+            # Method 2: Manual calculation if needed
+            if "vault_total_assets" in position and "vault_total_shares" in position:
+                if position["vault_total_shares"] > 0:
+                    total_supply_wei = int(position["vault_total_shares"] * 1e18)
+                    total_assets_wei = int(position["vault_total_assets"] * 1e18)
+
+                    # Calculate: user_assets = (user_shares * total_assets) / total_supply
+                    assets_wei = (balance_shares_wei * total_assets_wei) // total_supply_wei
+                    position["assets_value"] = assets_wei / 1e18
+                    position["calculation_method"] = "manual_ratio"
+                    print(f"  ✅ Manual calculation: {position['assets_value']:.4f} ({assets_wei} wei)")
+                else:
+                    position["assets_value"] = 0
+                    print(f"  ⚠️ Total supply is 0, cannot calculate")
 
         # Try to get user position (collateral/debt if it exists)
         if "getUserPosition" in available_fns:
@@ -140,7 +160,6 @@ def get_lending_position(contract, user_addr, market_name):
             if method in available_fns:
                 try:
                     rate = getattr(contract.functions, method)().call()
-                    # Convert rate to APY (assuming it's per second or per block)
                     position["supply_apy"] = rate / 1e18
                     break
                 except Exception:
@@ -201,9 +220,7 @@ def get_borrow_position(contract, user_addr, market_id, market_name):
 
 
 def fetch_all_positions():
-    """
-    Fetch all lending and borrow positions for the configured user address
-    """
+    """Fetch all lending and borrow positions for the configured user address"""
     results = {"lending": [], "borrow": []}
 
     print("\n🔄 Loading ABIs and fetching positions...\n")
@@ -225,6 +242,7 @@ def fetch_all_positions():
                 "address": market["address"],
                 "data": {"error": str(e)}
             })
+        print()
 
     for market in MARKETS["borrow"]:
         print(f"📥 {market['name']}...")
@@ -243,14 +261,13 @@ def fetch_all_positions():
                 "address": market["address"],
                 "data": {"error": str(e)}
             })
+        print()
 
     return results
 
 
 def format_value(key, value):
-    """
-    Format values for display with appropriate units and precision
-    """
+    """Format values for display with appropriate units and precision"""
     if isinstance(value, (int, float)):
         if "apy" in key.lower() or "rate" in key.lower():
             return f"{value * 100:.4f}%"
@@ -297,10 +314,14 @@ if __name__ == "__main__":
                 has_position = False
 
                 # Priority display: User's position
-                priority_keys = ["assets_value", "shares_balance", "health_factor", "supply_apy", "borrow_apy"]
+                priority_keys = ["assets_value", "shares_balance", "health_factor", "supply_apy", "borrow_apy", "calculation_method"]
                 for key in priority_keys:
-                    if key in m["data"] and not isinstance(m["data"][key], str):
-                        formatted_val = format_value(key, m["data"][key])
+                    if key in m["data"] and not isinstance(m["data"][key], str) or key == "calculation_method":
+                        val = m["data"][key]
+                        if key == "calculation_method":
+                            formatted_val = val
+                        else:
+                            formatted_val = format_value(key, val)
                         key_display = key.replace("_", " ").title()
 
                         # Highlight important values
@@ -308,7 +329,7 @@ if __name__ == "__main__":
                             print(f"  💰 {key_display:23s}: {formatted_val}")
                             has_position = True
                         elif key == "health_factor":
-                            emoji = "✅" if m["data"][key] > 1.5 else "⚠️" if m["data"][key] > 1.1 else "🔴"
+                            emoji = "✅" if val > 1.5 else "⚠️" if val > 1.1 else "🔴"
                             print(f"  {emoji} {key_display:23s}: {formatted_val}")
                         elif "apy" in key:
                             print(f"  📈 {key_display:23s}: {formatted_val}")
