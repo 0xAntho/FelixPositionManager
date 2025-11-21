@@ -47,11 +47,76 @@ MARKETS = {
             "asset_decimals": 6,  # USDT0 uses 6 decimals
         },
     ],
-    "borrow": []
+    "borrow": [
+        {
+            "name": "WHLP/USDT0 Borrow Market",
+            "morpho_address": "0x68e37dE8d93d3496ae143F2E900490f6280C57cD",
+            "market_id": "0xd4fd53f612eaf411a1acea053cfa28cbfeea683273c4133bf115b47a20130305",
+            "abi_file": "MorphoBlue.json",
+            "collateral_decimals": 18,  # WHLP
+            "borrow_decimals": 6,  # USDT0
+        }
+    ]
 }
 
 
-def get_lending_position(contract, user_addr, asset_decimals=18):
+def get_borrow_position(contract, user_addr, market_id, collateral_decimals=18, borrow_decimals=6):
+    """Retrieve borrow position from Morpho Blue"""
+    position = {}
+
+    try:
+        # Convert market_id to bytes32
+        if isinstance(market_id, str):
+            market_id_bytes = bytes.fromhex(market_id.replace('0x', ''))
+        else:
+            market_id_bytes = market_id
+
+        print(f"  Market ID: {market_id}")
+
+        # Get market data
+        market_data = contract.functions.market(market_id_bytes).call()
+        total_supply_assets = market_data[0]
+        total_supply_shares = market_data[1]
+        total_borrow_assets = market_data[2]
+        total_borrow_shares = market_data[3]
+
+        print(f"  Market total borrow assets: {total_borrow_assets / (10**borrow_decimals):.4f}")
+        print(f"  Market total borrow shares: {total_borrow_shares / 1e18:.4f}")
+
+        # Get user position
+        user_position = contract.functions.position(market_id_bytes, user_addr).call()
+        supply_shares = user_position[0]
+        borrow_shares = user_position[1]
+        collateral = user_position[2]
+
+        position["supply_shares"] = supply_shares / 1e18
+        position["borrow_shares"] = borrow_shares / 1e18
+        position["collateral"] = collateral / (10**collateral_decimals)
+
+        print(f"  User borrow shares: {position['borrow_shares']:.4f} ({borrow_shares} wei)")
+        print(f"  User collateral: {position['collateral']:.4f} ({collateral} wei)")
+
+        # Calculate borrowed amount: (user_shares * total_assets) / total_shares
+        if total_borrow_shares > 0 and borrow_shares > 0:
+            borrowed_amount = (borrow_shares * total_borrow_assets) // total_borrow_shares
+            position["borrowed"] = borrowed_amount / (10**borrow_decimals)
+            print(f"  ✅ Calculated borrowed: {position['borrowed']:.4f}")
+        else:
+            position["borrowed"] = 0
+
+        # Calculate health factor
+        # Health factor = collateral_value / borrowed_value
+        # For simplicity, assuming 1:1 pricing (you may need oracle data for accurate pricing)
+        if position.get("borrowed", 0) > 0:
+            # This is simplified - real calculation needs oracle prices
+            position["health_factor"] = position["collateral"] / position["borrowed"]
+            print(f"  Health factor: {position['health_factor']:.4f}")
+
+        return position
+
+    except Exception as e:
+        print(f"  ❌ Error: {str(e)}")
+        return {"error": str(e)}
     """Retrieve lending position with multiple calculation methods"""
     position = {}
     try:
@@ -114,12 +179,13 @@ def fetch_positions(address):
     except:
         return {"error": "Invalid address format"}
 
-    results = {"lending": [], "timestamp": datetime.now()}
+    results = {"lending": [], "borrow": [], "timestamp": datetime.now()}
 
     print(f"\n{'='*60}")
     print(f"Fetching positions for {checksum_addr}")
     print(f"{'='*60}")
 
+    # Fetch lending positions
     for market in MARKETS["lending"]:
         print(f"\n📥 {market['name']}...")
         try:
@@ -140,6 +206,34 @@ def fetch_positions(address):
                 "data": {"error": str(e)}
             })
 
+    # Fetch borrow positions
+    for market in MARKETS["borrow"]:
+        print(f"\n📥 {market['name']}...")
+        try:
+            abi = load_abi(market["abi_file"])
+            contract = w3.eth.contract(address=market["morpho_address"], abi=abi)
+            collateral_decimals = market.get("collateral_decimals", 18)
+            borrow_decimals = market.get("borrow_decimals", 6)
+            data = get_borrow_position(
+                contract,
+                checksum_addr,
+                market["market_id"],
+                collateral_decimals,
+                borrow_decimals
+            )
+            results["borrow"].append({
+                "name": market["name"],
+                "market_id": market["market_id"],
+                "data": data
+            })
+        except Exception as e:
+            print(f"  ❌ Failed: {str(e)}")
+            results["borrow"].append({
+                "name": market["name"],
+                "market_id": market["market_id"],
+                "data": {"error": str(e)}
+            })
+
     return results
 
 
@@ -152,46 +246,63 @@ def format_position_message(address, positions):
     msg += f"👤 `{address[:6]}...{address[-4:]}`\n"
     msg += f"🕐 {positions['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
-    total_value = 0
+    total_lending_value = 0
+    total_borrow_value = 0
 
+    # Lending positions
     for market in positions["lending"]:
         msg += f"━━━━━━━━━━━━━━━━━━━━\n"
-        msg += f"*{market['name']}*\n"
+        msg += f"*📈 {market['name']}*\n"
 
         if "error" in market["data"]:
             msg += f"❌ Error: {market['data']['error'][:100]}\n"
         elif market["data"].get("shares_balance", 0) > 0:
             shares = market["data"]["shares_balance"]
             value = market["data"].get("assets_value", 0)
-            total_value += value
+            total_lending_value += value
 
-            # Show asset value prominently
-            msg += f"💰 *Assets: {value:,.4f}$*\n"
+            msg += f"💰 *Assets: {value:,.4f}*\n"
             msg += f"📊 Shares: {shares:,.4f}\n"
 
-            # Debug info if values seem wrong
+            if "calculation_method" in market["data"]:
+                method = market["data"]["calculation_method"]
+                msg += f"🔧 Method: {method}\n"
+
             if value == 0 and shares > 0:
                 vault_assets = market["data"].get("vault_total_assets", 0)
                 vault_shares = market["data"].get("vault_total_shares", 0)
                 msg += f"⚠️ *Debug Info:*\n"
                 msg += f"  Vault Assets: {vault_assets:,.6f}\n"
                 msg += f"  Vault Shares: {vault_shares:,.6f}\n"
-                if vault_shares > 0:
-                    ratio = vault_assets / vault_shares
-                    expected = shares * ratio
-                    msg += f"  Share Price: {ratio:.8f}\n"
-                    msg += f"  Expected Value: {expected:.6f}\n"
+        else:
+            msg += f"ℹ️ No lending position\n"
 
-            # Health factor if available
+    # Borrow positions
+    for market in positions.get("borrow", []):
+        msg += f"━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"*📉 {market['name']}*\n"
+
+        if "error" in market["data"]:
+            msg += f"❌ Error: {market['data']['error'][:100]}\n"
+        elif market["data"].get("borrowed", 0) > 0 or market["data"].get("collateral", 0) > 0:
+            borrowed = market["data"].get("borrowed", 0)
+            collateral = market["data"].get("collateral", 0)
+            total_borrow_value += borrowed
+
+            msg += f"🔴 *Borrowed: {borrowed:,.4f}*\n"
+            msg += f"🔒 Collateral: {collateral:,.4f}\n"
+
             if "health_factor" in market["data"]:
                 hf = market["data"]["health_factor"]
                 emoji = "✅" if hf > 1.5 else "⚠️" if hf > 1.1 else "🔴"
                 msg += f"{emoji} Health Factor: {hf:.4f}\n"
         else:
-            msg += f"ℹ️ No position\n"
+            msg += f"ℹ️ No borrow position\n"
 
     msg += f"━━━━━━━━━━━━━━━━━━━━\n"
-    msg += f"💎 *Total Value: {total_value:,.4f}$*\n"
+    msg += f"💚 *Total Lending: {total_lending_value:,.4f}*\n"
+    msg += f"🔴 *Total Borrowed: {total_borrow_value:,.4f}*\n"
+    msg += f"💎 *Net Value: {total_lending_value - total_borrow_value:,.4f}*\n"
 
     return msg
 
