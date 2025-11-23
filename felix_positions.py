@@ -204,37 +204,45 @@ def get_borrow_position(contract, user_addr, market_id, market_name, collateral_
         total_borrow_assets = market_data[2]
         total_borrow_shares = market_data[3]
 
-        print(f"  Market total borrow assets: {total_borrow_assets / (10**borrow_decimals):.4f}")
-        print(f"  Market total borrow shares: {total_borrow_shares / 1e18:.4f}")
+        borrow_divisor = 10 ** borrow_decimals
+
+        print(f"  Market total borrow assets: {total_borrow_assets / borrow_divisor:.4f} ({total_borrow_assets} wei, {borrow_decimals} decimals)")
+        print(f"  Market total borrow shares: {total_borrow_shares / borrow_divisor:.4f} ({total_borrow_shares} wei, {borrow_decimals} decimals)")
 
         # Get user position
         user_position = contract.functions.position(market_id_bytes, user_addr).call()
         supply_shares = user_position[0]
         borrow_shares = user_position[1]
-        collateral = user_position[2]
+        collateral_wei = user_position[2]
+
+        collateral_divisor = 10 ** collateral_decimals
 
         position["supply_shares"] = supply_shares / 1e18
-        position["borrow_shares"] = borrow_shares / 1e18
-        position["collateral"] = collateral / (10**collateral_decimals)
+        position["borrow_shares"] = borrow_shares / borrow_divisor
+        position["collateral"] = collateral_wei / collateral_divisor
 
-        print(f"  User borrow shares: {position['borrow_shares']:.4f} ({borrow_shares} wei)")
-        print(f"  User collateral: {position['collateral']:.4f} ({collateral} wei)")
+        print(f"  User borrow shares: {position['borrow_shares']:.4f} ({borrow_shares} wei, {borrow_decimals} decimals)")
+        print(f"  User collateral: {position['collateral']:.6f} ({collateral_wei} wei, {collateral_decimals} decimals)")
 
         # Calculate borrowed amount: (user_shares * total_assets) / total_shares
         if total_borrow_shares > 0 and borrow_shares > 0:
-            borrowed_amount = (borrow_shares * total_borrow_assets) // total_borrow_shares
-            position["borrowed"] = borrowed_amount / (10**borrow_decimals)
-            print(f"  ✅ Calculated borrowed: {position['borrowed']:.4f}")
+            borrowed_amount_wei = (borrow_shares * total_borrow_assets) // total_borrow_shares
+            position["borrowed"] = borrowed_amount_wei / borrow_divisor
+            print(f"  ✅ Calculated borrowed: {position['borrowed']:.4f} ({borrowed_amount_wei} wei)")
         else:
             position["borrowed"] = 0
+            print(f"  No borrow shares")
 
         # Calculate health factor
         # Health factor = collateral_value / borrowed_value
-        # For simplicity, assuming 1:1 pricing (you may need oracle data for accurate pricing)
-        if position.get("borrowed", 0) > 0:
-            # This is simplified - real calculation needs oracle prices
+        # This is simplified - real calculation needs oracle prices and LLTV
+        if position.get("borrowed", 0) > 0 and position["collateral"] > 0:
+            # Simplified: assuming 1:1 pricing
             position["health_factor"] = position["collateral"] / position["borrowed"]
-            print(f"  Health factor: {position['health_factor']:.4f}")
+            print(f"  ⚠️  Simplified health factor: {position['health_factor']:.4f} (needs oracle for accuracy)")
+        elif position.get("borrowed", 0) == 0:
+            position["health_factor"] = float('inf')
+            print(f"  Health factor: ∞ (no debt)")
 
         return position if position else {"info": "No position data available"}
 

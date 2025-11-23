@@ -53,14 +53,71 @@ MARKETS = {
             "morpho_address": "0x68e37dE8d93d3496ae143F2E900490f6280C57cD",
             "market_id": "0xd4fd53f612eaf411a1acea053cfa28cbfeea683273c4133bf115b47a20130305",
             "abi_file": "MorphoBlue.json",
-            "collateral_decimals": 18,  # WHLP
+            "collateral_decimals": 6,  # WHLP uses 6 decimals in this context
             "borrow_decimals": 6,  # USDT0
+            "borrow_shares_decimals": 18,  # Morpho uses 18 decimals for shares
         }
     ]
 }
 
 
-def get_borrow_position(contract, user_addr, market_id, collateral_decimals=18, borrow_decimals=6):
+def get_lending_position(contract, user_addr, asset_decimals=18):
+    """Retrieve lending position with multiple calculation methods"""
+    position = {}
+    try:
+        # Get user shares (vault shares are always 18 decimals in ERC4626)
+        balance_shares_wei = contract.functions.balanceOf(user_addr).call()
+        shares = balance_shares_wei / 1e18
+        position["shares_balance"] = shares
+
+        print(f"  User shares: {shares:.4f} ({balance_shares_wei} wei)")
+
+        if shares == 0:
+            position["assets_value"] = 0
+            return position
+
+        # Get vault totals
+        total_assets_wei = contract.functions.totalAssets().call()
+        total_supply_wei = contract.functions.totalSupply().call()
+
+        # Assets use the underlying token decimals, shares use 18
+        asset_divisor = 10 ** asset_decimals
+        position["vault_total_assets"] = total_assets_wei / asset_divisor
+        position["vault_total_shares"] = total_supply_wei / 1e18
+
+        print(f"  Vault total assets: {position['vault_total_assets']:.4f} ({total_assets_wei} wei, {asset_decimals} decimals)")
+        print(f"  Vault total shares: {position['vault_total_shares']:.4f} ({total_supply_wei} wei, 18 decimals)")
+
+        # Method 1: Try convertToAssets (ERC4626 standard)
+        try:
+            assets_wei = contract.functions.convertToAssets(balance_shares_wei).call()
+            position["assets_value"] = assets_wei / asset_divisor
+            position["calculation_method"] = "convertToAssets"
+            print(f"  ✅ convertToAssets: {position['assets_value']:.4f} assets ({assets_wei} wei ÷ 10^{asset_decimals})")
+            return position
+        except Exception as e:
+            print(f"  ❌ convertToAssets failed: {str(e)[:100]}")
+
+        # Method 2: Manual calculation using ratio
+        if total_supply_wei > 0:
+            # assets_value = (user_shares * total_assets) / total_supply
+            assets_wei = (balance_shares_wei * total_assets_wei) // total_supply_wei
+            position["assets_value"] = assets_wei / asset_divisor
+            position["calculation_method"] = "manual_ratio"
+            print(f"  ✅ Manual calculation: {position['assets_value']:.4f} ({assets_wei} wei)")
+        else:
+            position["assets_value"] = 0
+            position["calculation_method"] = "zero_supply"
+            print(f"  ⚠️ Total supply is 0, cannot calculate")
+
+        return position
+
+    except Exception as e:
+        print(f"  ❌ Error: {str(e)}")
+        return {"error": str(e)}
+
+
+def get_borrow_position(contract, user_addr, market_id, collateral_decimals=18, borrow_decimals=6, borrow_shares_decimals=18):
     """Retrieve borrow position from Morpho Blue"""
     position = {}
 
@@ -80,37 +137,46 @@ def get_borrow_position(contract, user_addr, market_id, collateral_decimals=18, 
         total_borrow_assets = market_data[2]
         total_borrow_shares = market_data[3]
 
-        print(f"  Market total borrow assets: {total_borrow_assets / (10**borrow_decimals):.4f}")
-        print(f"  Market total borrow shares: {total_borrow_shares / 1e18:.4f}")
+        borrow_divisor = 10 ** borrow_decimals
+        shares_divisor = 10 ** borrow_shares_decimals
+
+        print(f"  Market total borrow assets: {total_borrow_assets / borrow_divisor:.4f} ({total_borrow_assets} wei, {borrow_decimals} decimals)")
+        print(f"  Market total borrow shares: {total_borrow_shares / shares_divisor:.4f} ({total_borrow_shares} wei, {borrow_shares_decimals} decimals)")
 
         # Get user position
         user_position = contract.functions.position(market_id_bytes, user_addr).call()
         supply_shares = user_position[0]
-        borrow_shares = user_position[1]
-        collateral = user_position[2]
+        borrow_shares_wei = user_position[1]
+        collateral_wei = user_position[2]
+
+        collateral_divisor = 10 ** collateral_decimals
 
         position["supply_shares"] = supply_shares / 1e18
-        position["borrow_shares"] = borrow_shares / 1e18
-        position["collateral"] = collateral / (10**collateral_decimals)
+        position["borrow_shares"] = borrow_shares_wei / shares_divisor
+        position["collateral"] = collateral_wei / collateral_divisor
 
-        print(f"  User borrow shares: {position['borrow_shares']:.4f} ({borrow_shares} wei)")
-        print(f"  User collateral: {position['collateral']:.4f} ({collateral} wei)")
+        print(f"  User borrow shares: {position['borrow_shares']:.6f} ({borrow_shares_wei} wei, {borrow_shares_decimals} decimals)")
+        print(f"  User collateral: {position['collateral']:.4f} ({collateral_wei} wei, {collateral_decimals} decimals)")
 
         # Calculate borrowed amount: (user_shares * total_assets) / total_shares
-        if total_borrow_shares > 0 and borrow_shares > 0:
-            borrowed_amount = (borrow_shares * total_borrow_assets) // total_borrow_shares
-            position["borrowed"] = borrowed_amount / (10**borrow_decimals)
-            print(f"  ✅ Calculated borrowed: {position['borrowed']:.4f}")
+        if total_borrow_shares > 0 and borrow_shares_wei > 0:
+            borrowed_amount_wei = (borrow_shares_wei * total_borrow_assets) // total_borrow_shares
+            position["borrowed"] = borrowed_amount_wei / borrow_divisor
+            print(f"  ✅ Calculated borrowed: {position['borrowed']:.4f} ({borrowed_amount_wei} wei)")
         else:
             position["borrowed"] = 0
+            print(f"  No borrow shares")
 
         # Calculate health factor
         # Health factor = collateral_value / borrowed_value
-        # For simplicity, assuming 1:1 pricing (you may need oracle data for accurate pricing)
-        if position.get("borrowed", 0) > 0:
-            # This is simplified - real calculation needs oracle prices
+        # This is simplified - real calculation needs oracle prices and LLTV
+        if position.get("borrowed", 0) > 0 and position["collateral"] > 0:
+            # Simplified: assuming 1:1 pricing
             position["health_factor"] = position["collateral"] / position["borrowed"]
-            print(f"  Health factor: {position['health_factor']:.4f}")
+            print(f"  ⚠️  Simplified health factor: {position['health_factor']:.4f} (needs oracle for accuracy)")
+        elif position.get("borrowed", 0) == 0:
+            position["health_factor"] = float('inf')
+            print(f"  Health factor: ∞ (no debt)")
 
         return position
 
@@ -214,12 +280,14 @@ def fetch_positions(address):
             contract = w3.eth.contract(address=market["morpho_address"], abi=abi)
             collateral_decimals = market.get("collateral_decimals", 18)
             borrow_decimals = market.get("borrow_decimals", 6)
+            borrow_shares_decimals = market.get("borrow_shares_decimals", 18)
             data = get_borrow_position(
                 contract,
                 checksum_addr,
                 market["market_id"],
                 collateral_decimals,
-                borrow_decimals
+                borrow_decimals,
+                borrow_shares_decimals
             )
             results["borrow"].append({
                 "name": market["name"],
@@ -266,7 +334,6 @@ def format_position_message(address, positions):
 
             if "calculation_method" in market["data"]:
                 method = market["data"]["calculation_method"]
-                msg += f"🔧 Method: {method}\n"
 
             if value == 0 and shares > 0:
                 vault_assets = market["data"].get("vault_total_assets", 0)
