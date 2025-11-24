@@ -26,11 +26,15 @@ user_data = {}
 # All available markets
 ALL_MARKETS = {
     "lending": [
-        {"name": "USDhl Frontier Lending", "address": "0x9896a8605763106e57A51aa0a97Fe8099E806bb3", "abi_file": "USDhlFrontierLending.json", "asset_decimals": 6},
-        {"name": "USDT0 Frontier Lending", "address": "0x66c71204B70aE27BE6dC3eb41F9aF5868E68fDb6", "abi_file": "USDhlFrontierLending.json", "asset_decimals": 6},
+        {"name": "USDe", "address": "0x835febf893c6dddee5cf762b0f8e31c5b06938ab", "abi_file": "USDhlFrontierLending.json", "asset_decimals": 6},
+        {"name": "USDT0", "address": "0xfc5126377f0efc0041c0969ef9ba903ce67d151e", "abi_file": "USDhlFrontierLending.json", "asset_decimals": 6},
+        {"name": "USDT0 (Frontier)", "address": "0x9896a8605763106e57A51aa0a97Fe8099E806bb3", "abi_file": "USDhlFrontierLending.json", "asset_decimals": 6},
+        {"name": "USDhl", "address": "0x9c59a9389D8f72DE2CdAf1126F36EA4790E2275e", "abi_file": "USDhlFrontierLending.json", "asset_decimals": 6},
+        {"name": "USDhl (Frontier)", "address": "0x66c71204B70aE27BE6dC3eb41F9aF5868E68fDb6", "abi_file": "USDhlFrontierLending.json", "asset_decimals": 6},
+        {"name": "HYPE", "address": "0x2900ABd73631b2f60747e687095537B673c06A76", "abi_file": "USDhlFrontierLending.json", "asset_decimals": 18},
     ],
     "borrow": [
-        {"name": "WHLP/USDT0 Borrow Market", "morpho_address": "0x68e37dE8d93d3496ae143F2E900490f6280C57cD", "market_id": "0xd4fd53f612eaf411a1acea053cfa28cbfeea683273c4133bf115b47a20130305", "abi_file": "MorphoBlue.json", "collateral_decimals": 6, "borrow_decimals": 6, "borrow_shares_decimals": 18}
+        {"name": "WHLP/USDT0", "morpho_address": "0x68e37dE8d93d3496ae143F2E900490f6280C57cD", "market_id": "0xd4fd53f612eaf411a1acea053cfa28cbfeea683273c4133bf115b47a20130305", "abi_file": "MorphoBlue.json", "collateral_decimals": 6, "borrow_decimals": 6, "borrow_shares_decimals": 18}
     ]
 }
 
