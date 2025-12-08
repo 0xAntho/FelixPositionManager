@@ -50,6 +50,12 @@ def get_lending_position(contract, user_addr, asset_decimals=18):
     """Retrieve lending position"""
     position = {}
     try:
+        # Convert address to checksum if needed
+        try:
+            user_addr = w3.to_checksum_address(user_addr)
+        except:
+            pass
+
         balance_shares_wei = contract.functions.balanceOf(user_addr).call()
         shares = balance_shares_wei / 1e18
         position["shares_balance"] = shares
@@ -129,22 +135,29 @@ def fetch_positions(address, chat_id=None):
 
     results = {"lending": [], "borrow": [], "timestamp": datetime.now()}
 
+    print(f"Fetching for: {checksum_addr}")  # Debug
+
     for market in ALL_MARKETS["lending"]:
         try:
             abi = load_abi(market["abi_file"])
-            contract = w3.eth.contract(address=market["address"], abi=abi)
+            # Convert contract address to checksum too
+            contract_addr = w3.to_checksum_address(market["address"])
+            contract = w3.eth.contract(address=contract_addr, abi=abi)
             data = get_lending_position(contract, checksum_addr, market.get("asset_decimals", 18))
             results["lending"].append({"name": market["name"], "address": market["address"], "data": data})
         except Exception as e:
+            print(f"Error in {market['name']}: {str(e)}")  # Debug
             results["lending"].append({"name": market["name"], "address": market["address"], "data": {"error": str(e)}})
 
     for market in ALL_MARKETS["borrow"]:
         try:
             abi = load_abi(market["abi_file"])
-            contract = w3.eth.contract(address=market["morpho_address"], abi=abi)
+            contract_addr = w3.to_checksum_address(market["morpho_address"])
+            contract = w3.eth.contract(address=contract_addr, abi=abi)
             data = get_borrow_position(contract, checksum_addr, market["market_id"], market.get("collateral_decimals", 18), market.get("borrow_decimals", 6), market.get("borrow_shares_decimals", 18))
             results["borrow"].append({"name": market["name"], "market_id": market["market_id"], "data": data})
         except Exception as e:
+            print(f"Error in {market['name']}: {str(e)}")  # Debug
             results["borrow"].append({"name": market["name"], "market_id": market["market_id"], "data": {"error": str(e)}})
 
     return results
