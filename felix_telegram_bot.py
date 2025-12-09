@@ -8,10 +8,9 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 
 load_dotenv()
 
-# Configuration
 RPC_URL = os.getenv("RPC_URL")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHECK_INTERVAL = 1800  # 30 minutes in seconds
+CHECK_INTERVAL = 1800
 
 if not RPC_URL or not TELEGRAM_BOT_TOKEN:
     raise ValueError("⚠️ Missing RPC_URL or TELEGRAM_BOT_TOKEN in .env")
@@ -20,10 +19,8 @@ w3 = Web3(Web3.HTTPProvider(RPC_URL))
 if not w3.is_connected():
     raise ConnectionError("❌ Unable to connect to RPC")
 
-# User data storage
 user_data = {}
 
-# All available markets
 ALL_MARKETS = {
     "lending": [
         {"name": "USDe", "address": "0x835febf893c6dddee5cf762b0f8e31c5b06938ab", "abi_file": "Lend/USDeLending.json", "asset_decimals": 6},
@@ -51,7 +48,6 @@ def get_lending_position(contract, user_addr, asset_decimals=18):
     """Retrieve lending position"""
     position = {}
     try:
-        # Convert address to checksum if needed
         try:
             user_addr = w3.to_checksum_address(user_addr)
         except:
@@ -141,7 +137,6 @@ def fetch_positions(address, chat_id=None):
     for market in ALL_MARKETS["lending"]:
         try:
             abi = load_abi(market["abi_file"])
-            # Convert contract address to checksum too
             contract_addr = w3.to_checksum_address(market["address"])
             contract = w3.eth.contract(address=contract_addr, abi=abi)
             data = get_lending_position(contract, checksum_addr, market.get("asset_decimals", 18))
@@ -181,9 +176,9 @@ def format_position_message(address, positions):
         elif market["data"].get("shares_balance", 0) > 0:
             value = market["data"].get("assets_value", 0)
             total_lending_value += value
-            msg += f"💰 *Assets: {value:,.4f}*\n📊 Shares: {market['data']['shares_balance']:,.4f}\n"
+            msg += f"💰 *Assets: {value:,.4f}*\n"
         else:
-            msg += f"ℹ️ No lending position\n"
+            msg += f"No lending position\n"
 
     for market in positions.get("borrow", []):
         msg += f"━━━━━━━━━━━━━━━━━━━━\n*📉 {market['name']}*\n"
@@ -325,10 +320,7 @@ async def market_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "back_markets":
         msg = (
             f"📊 *Market Selection*\n\n"
-            f"Select which markets you want to track.\n"
-            f"By default, all markets are shown.\n\n"
-            f"📈 Lending markets: All\n"
-            f"📉 Borrow markets: All\n\n"
+            f"Show all the current markets tracked by the bot.\n"
             f"Choose a category:"
         )
         keyboard = [

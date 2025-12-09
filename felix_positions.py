@@ -24,7 +24,6 @@ w3 = Web3(Web3.HTTPProvider(RPC_URL))
 if not w3.is_connected():
     raise ConnectionError("❌ Unable to connect to RPC")
 
-# Convert address to checksum format
 USER_ADDRESS = w3.to_checksum_address(USER_ADDRESS)
 
 
@@ -58,13 +57,13 @@ MARKETS = {
             "name": "USDhl Frontier Lending",
             "address": "0x9896a8605763106e57A51aa0a97Fe8099E806bb3",
             "abi_file": "USDhlFrontierLending.json",
-            "asset_decimals": 6,  # USDhl uses 6 decimals
+            "asset_decimals": 6,
         },
         {
             "name": "USDT0 Frontier Lending",
             "address": "0x66c71204B70aE27BE6dC3eb41F9aF5868E68fDb6",
             "abi_file": "USDT0FrontierLending.json",
-            "asset_decimals": 6,  # USDT0 uses 6 decimals
+            "asset_decimals": 6,
         },
     ],
     "borrow": [
@@ -73,8 +72,8 @@ MARKETS = {
             "morpho_address": "0x68e37dE8d93d3496ae143F2E900490f6280C57cD",
             "market_id": "0xd4fd53f612eaf411a1acea053cfa28cbfeea683273c4133bf115b47a20130305",
             "abi_file": "MorphoBlue.json",
-            "collateral_decimals": 18,  # WHLP
-            "borrow_decimals": 6,  # USDT0
+            "collateral_decimals": 18,
+            "borrow_decimals": 6,
         }
     ]
 }
@@ -95,7 +94,6 @@ def get_lending_position(contract, user_addr, market_name, asset_decimals=18):
     try:
         available_fns = get_contract_functions(contract)
 
-        # Get user shares (vault shares are always 18 decimals in ERC4626)
         if "balanceOf" in available_fns:
             try:
                 balance_shares_wei = contract.functions.balanceOf(user_addr).call()
@@ -129,7 +127,6 @@ def get_lending_position(contract, user_addr, market_name, asset_decimals=18):
         if "shares_balance" in position and position["shares_balance"] > 0:
             balance_shares_wei = int(position["shares_balance"] * 1e18)
 
-            # Method 1: Try convertToAssets (ERC4626 standard)
             if "convertToAssets" in available_fns:
                 try:
                     assets_wei = contract.functions.convertToAssets(balance_shares_wei).call()
@@ -140,13 +137,11 @@ def get_lending_position(contract, user_addr, market_name, asset_decimals=18):
                 except Exception as e:
                     print(f"  ❌ convertToAssets failed: {str(e)[:100]}")
 
-            # Method 2: Manual calculation if needed
             if "vault_total_assets" in position and "vault_total_shares" in position:
                 if position["vault_total_shares"] > 0:
                     total_supply_wei = int(position["vault_total_shares"] * 1e18)
                     total_assets_wei = int(position["vault_total_assets"] * asset_divisor)
 
-                    # Calculate: user_assets = (user_shares * total_assets) / total_supply
                     assets_wei = (balance_shares_wei * total_assets_wei) // total_supply_wei
                     position["assets_value"] = assets_wei / asset_divisor
                     position["calculation_method"] = "manual_ratio"
@@ -155,7 +150,6 @@ def get_lending_position(contract, user_addr, market_name, asset_decimals=18):
                     position["assets_value"] = 0
                     print(f"  ⚠️ Total supply is 0, cannot calculate")
 
-        # Try to get user position (collateral/debt if it exists)
         if "getUserPosition" in available_fns:
             try:
                 data = contract.functions.getUserPosition(user_addr).call()
@@ -165,7 +159,6 @@ def get_lending_position(contract, user_addr, market_name, asset_decimals=18):
             except Exception:
                 pass
 
-        # Try to get supply APY
         apy_methods = ["supplyRatePerBlock", "supplyRate", "getSupplyRate"]
         for method in apy_methods:
             if method in available_fns:
@@ -189,7 +182,6 @@ def get_borrow_position(contract, user_addr, market_id, market_name, collateral_
     position = {}
 
     try:
-        # Convert market_id to bytes32
         if isinstance(market_id, str):
             market_id_bytes = bytes.fromhex(market_id.replace('0x', ''))
         else:
@@ -197,7 +189,6 @@ def get_borrow_position(contract, user_addr, market_id, market_name, collateral_
 
         print(f"  Market ID: {market_id}")
 
-        # Get market data
         market_data = contract.functions.market(market_id_bytes).call()
         total_supply_assets = market_data[0]
         total_supply_shares = market_data[1]
@@ -209,7 +200,6 @@ def get_borrow_position(contract, user_addr, market_id, market_name, collateral_
         print(f"  Market total borrow assets: {total_borrow_assets / borrow_divisor:.4f} ({total_borrow_assets} wei, {borrow_decimals} decimals)")
         print(f"  Market total borrow shares: {total_borrow_shares / borrow_divisor:.4f} ({total_borrow_shares} wei, {borrow_decimals} decimals)")
 
-        # Get user position
         user_position = contract.functions.position(market_id_bytes, user_addr).call()
         supply_shares = user_position[0]
         borrow_shares = user_position[1]
@@ -224,7 +214,6 @@ def get_borrow_position(contract, user_addr, market_id, market_name, collateral_
         print(f"  User borrow shares: {position['borrow_shares']:.4f} ({borrow_shares} wei, {borrow_decimals} decimals)")
         print(f"  User collateral: {position['collateral']:.6f} ({collateral_wei} wei, {collateral_decimals} decimals)")
 
-        # Calculate borrowed amount: (user_shares * total_assets) / total_shares
         if total_borrow_shares > 0 and borrow_shares > 0:
             borrowed_amount_wei = (borrow_shares * total_borrow_assets) // total_borrow_shares
             position["borrowed"] = borrowed_amount_wei / borrow_divisor
@@ -233,11 +222,7 @@ def get_borrow_position(contract, user_addr, market_id, market_name, collateral_
             position["borrowed"] = 0
             print(f"  No borrow shares")
 
-        # Calculate health factor
-        # Health factor = collateral_value / borrowed_value
-        # This is simplified - real calculation needs oracle prices and LLTV
         if position.get("borrowed", 0) > 0 and position["collateral"] > 0:
-            # Simplified: assuming 1:1 pricing
             position["health_factor"] = position["collateral"] / position["borrowed"]
             print(f"  ⚠️  Simplified health factor: {position['health_factor']:.4f} (needs oracle for accuracy)")
         elif position.get("borrowed", 0) == 0:
@@ -258,17 +243,14 @@ def get_borrow_position(contract, user_addr, market_id, market_name, collateral_
     try:
         available_fns = get_contract_functions(contract)
 
-        # Try to get user position
         if "getUserPosition" in available_fns:
             try:
-                # Try with market_id first
                 data = contract.functions.getUserPosition(market_id, user_addr).call()
                 position["collateral"] = data[0] / 1e18
                 position["borrowed"] = data[1] / 1e18
                 position["health_factor"] = data[2] / 1e18
             except Exception:
                 try:
-                    # Try without market_id
                     data = contract.functions.getUserPosition(user_addr).call()
                     position["collateral"] = data[0] / 1e18
                     position["borrowed"] = data[1] / 1e18
@@ -276,7 +258,6 @@ def get_borrow_position(contract, user_addr, market_id, market_name, collateral_
                 except Exception:
                     pass
 
-        # Try to get borrow APY
         borrow_methods = ["getBorrowRate", "borrowRate", "borrowRatePerBlock"]
         for method in borrow_methods:
             if method in available_fns:
@@ -302,7 +283,6 @@ def fetch_all_positions():
 
     print("\n🔄 Loading ABIs and fetching positions...\n")
 
-    # Fetch lending positions
     for market in MARKETS["lending"]:
         print(f"📥 {market['name']}...")
         try:
@@ -323,7 +303,6 @@ def fetch_all_positions():
             })
         print()
 
-    # Fetch borrow positions
     for market in MARKETS["borrow"]:
         print(f"📥 {market['name']}...")
         try:
@@ -402,7 +381,6 @@ if __name__ == "__main__":
             else:
                 has_position = False
 
-                # Priority display: User's position
                 priority_keys = ["assets_value", "shares_balance", "borrowed", "collateral", "health_factor", "supply_apy", "borrow_apy", "calculation_method"]
                 for key in priority_keys:
                     if key in m["data"] and not isinstance(m["data"][key], str) or key == "calculation_method":
@@ -413,7 +391,6 @@ if __name__ == "__main__":
                             formatted_val = format_value(key, val)
                         key_display = key.replace("_", " ").title()
 
-                        # Highlight important values
                         if key == "assets_value":
                             print(f"  💰 {key_display:23s}: {formatted_val}")
                             has_position = True
@@ -425,14 +402,12 @@ if __name__ == "__main__":
                         else:
                             print(f"  {key_display:25s}: {formatted_val}")
 
-                # Other data
                 for key, val in m["data"].items():
                     if key not in priority_keys and not key.endswith("_error") and key != "info":
                         formatted_val = format_value(key, val)
                         key_display = key.replace("_", " ").title()
                         print(f"  {key_display:25s}: {formatted_val}")
 
-                # Show errors at the end if any
                 for key, val in m["data"].items():
                     if key.endswith("_error"):
                         error_name = key.replace("_error", "").title()
